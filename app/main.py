@@ -1,56 +1,41 @@
 """Minimal FastAPI server for the CV Optimization Assistant."""
 from __future__ import annotations
 
-import logging
-from typing import Any, Dict, Optional
+from pathlib import Path
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from .logging_utils import configure_logging, get_logger
+
+# Configure logging on module load
+configure_logging()
+
+# Module-level constants
+_PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+
+logger = get_logger("main")
+
+
+# ============================================================================
+# FastAPI Application
+# ============================================================================
+
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.requests import Request
 
 from .graph import build_graph
 
-logger = logging.getLogger(__name__)
-
 app = FastAPI(title="CV Optimization Assistant")
-templates = Jinja2Templates(directory="app/templates")
 
-_GRAPH = None
-_GRAPH_ERROR: Optional[str] = None
-
-
-def get_graph_executor():
-    """Lazy-load the LangGraph workflow."""
-
-    global _GRAPH, _GRAPH_ERROR
-    if _GRAPH is not None:
-        return _GRAPH
-    if _GRAPH_ERROR is not None:
-        return None
-
-    try:
-        _GRAPH = build_graph()
-    except RuntimeError as exc:  # Likely LangGraph missing
-        _GRAPH_ERROR = str(exc)
-        logger.warning("LangGraph unavailable: %s", exc)
-        return None
-
-    return _GRAPH
+# Templates
+templates = Jinja2Templates(directory=str(_PROJECT_ROOT / "app" / "templates"))
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    """Render the upload form."""
-
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "result_markdown": None,
-            "error": None,
-            "job_description_text": "",
-        },
-    )
+async def home(request: Request):
+    """Serve the main upload form."""
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.post("/analyze", response_class=HTMLResponse)
@@ -59,53 +44,44 @@ async def analyze(
     cv_file: UploadFile = File(...),
     job_description: str = Form(...),
 ):
-    """Accept the CV + JD and invoke the LangGraph workflow (placeholder)."""
-
-    error: Optional[str] = None
-    result_markdown: Optional[str] = None
-
-    if cv_file.content_type not in {"application/pdf", "application/x-pdf"}:
-        error = "Only PDF CVs are supported in this version."
-    elif not job_description.strip():
-        error = "Please paste a job description so the system can tailor your CV."
-
-    if error:
+    """
+    Accept CV (PDF) and job description, run the LangGraph workflow,
+    and return the final markdown report as rendered HTML.
+    """
+    try:
+        # Read PDF bytes
+        cv_pdf_bytes = await cv_file.read()
+        
+        # Build and run the graph
+        graph = build_graph()
+        
+        initial_state = {
+            "cv_pdf_bytes": cv_pdf_bytes,
+            "job_description_text": job_description,
+        }
+        
+        # Run the graph
+        final_state = await graph.ainvoke(initial_state)
+        
+        # Extract the final markdown
+        final_markdown = final_state.get("final_markdown", "")
+        
+        # Return the template with the markdown result
         return templates.TemplateResponse(
             "index.html",
             {
                 "request": request,
-                "error": error,
-                "result_markdown": result_markdown,
+                "result_markdown": final_markdown,
                 "job_description_text": job_description,
             },
         )
-
-    cv_bytes = await cv_file.read()
-    executor = get_graph_executor()
-    state: Dict[str, Any] = {
-        "cv_pdf_bytes": cv_bytes,
-        "job_description_text": job_description,
-    }
-
-    if executor is None:
-        # LangGraph dependency missing; return a friendly message instead of failing.
-        result_markdown = (
-            "## CV Optimization Assistant\n\n"
-            "The LangGraph dependency is not installed yet, so analysis cannot run."
+    except Exception as e:
+        logger.exception("Error during CV analysis")
+        return templates.TemplateResponse(
+            "index.html",
+            {
+                "request": request,
+                "error": f"An error occurred during analysis: {str(e)}",
+                "job_description_text": job_description,
+            },
         )
-    else:
-        result = await executor.ainvoke(state)
-        result_markdown = result.get(
-            "final_markdown",
-            "## CV Optimization Assistant\n\nPipeline nodes are still placeholders.",
-        )
-
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "error": error,
-            "result_markdown": result_markdown,
-            "job_description_text": job_description,
-        },
-    )

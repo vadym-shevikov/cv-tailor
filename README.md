@@ -116,16 +116,16 @@ You can edit these files to customize the guidance and examples the agents use.
 
 ### 5. Configure environment variables
 
-Create a `.env` file (or export env vars in your shell):
+Create a `.env` file (or export env vars in your shell). See `.env.example` for a starter template:
 
 ```bash
 OPENAI_API_KEY=your_api_key_here
 LLM_MODEL_NAME=gpt-4o-mini   # or another model name if you prefer
-MCP_SERVER_URI=filesystem://kb   # Example, adjust depending on your MCP setup
+MCP_ENABLED=true             # set to false to fall back to direct kb/ reads
+MCP_COMMAND="mcp-server-filesystem ./kb"   # override the filesystem MCP command if needed
 ```
 
-> The exact MCP connection string / config depends on how you run the filesystem MCP server.
-> Update `MCP_SERVER_URI` or related settings in `mcp_client.py` to match your environment.
+> All KB content lives under the repo-local `kb/` directory. MCP access is restricted to this folder so no global paths (e.g., `/tmp` or `~`) are touched by the knowledge layer.
 
 ### 6. Run the MCP server
 
@@ -134,12 +134,32 @@ Run your **filesystem MCP server** pointing at the `kb/` directory.
 Conceptually:
 
 ```bash
-# Pseudocode / example – adjust to your actual MCP server implementation
-mcp-filesystem --root ./kb
+# Example command for the official MCP filesystem server
+mcp-server-filesystem ./kb
 ```
 
 Check your MCP server docs for the exact command and configuration.
 The important part: the server should expose read-only access to `kb/` and be reachable by the Python app (see `mcp_client.py`).
+
+---
+
+## MCP filesystem integration
+
+- The backend uses the **official MCP Python SDK** to communicate with a filesystem MCP server over stdio. By default it launches `mcp-server-filesystem` with the `./kb` directory, keeping all knowledge reads confined to this repo.
+- The MCP server binary should be installed globally (via npm):
+
+  ```bash
+  npm install -g @modelcontextprotocol/server-filesystem
+  ```
+
+- Environment variables control how the client connects:
+  - `MCP_ENABLED=true|false` — disable to force direct `kb/` reads.
+  - `MCP_COMMAND="mcp-server-filesystem ./kb"` — override the launch command.
+- All KB files (`ats_tips.md`, `cv_best_practices.md`, `bullet_examples.md`) live under `kb/` in this repository. The MCP client enforces that scope, so no system directories or `/tmp` paths are touched.
+- If the MCP server fails to start or initialize, the app automatically disables MCP for the current process and keeps serving requests via on-disk `kb/` reads (equivalent to setting `MCP_ENABLED=false`).
+- Set `CV_TAILOR_DEBUG=true` while running the server to see detailed MCP logs. When it works, you'll see log lines like `MCP: fetched ats_tips via MCP` instead of `using disk`.
+
+---
 
 ### 7. Run the backend
 
@@ -248,4 +268,3 @@ Potential future improvements:
 
 This tool is an **educational project** and does **not guarantee** that your CV will pass any specific ATS or result in interviews.
 Always review and adjust the generated content yourself before using it in real applications.
-

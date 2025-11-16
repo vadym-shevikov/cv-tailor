@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
+import time
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List
 
@@ -12,7 +12,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-from .mcp_client import get_kb_text
+from .mcp_sdk_client import get_kb_text
 from .models import (
     AnalysisReport,
     ExperienceEntry,
@@ -22,11 +22,18 @@ from .models import (
     StructuredCV,
 )
 from .pdf_utils import extract_text_from_pdf
+from .logging_utils import DEBUG_ENABLED, format_with_request, get_logger
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger("agents")
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
 
 AgentState = Dict[str, Any]
+
+
+def _debug(message: str, *args) -> None:
+    if DEBUG_ENABLED:
+        logger.debug(format_with_request(message), *args)
 
 
 def parse_json_from_llm(raw: str) -> Dict[str, Any]:
@@ -69,6 +76,8 @@ def parse_json_from_llm(raw: str) -> Dict[str, Any]:
 def run_parsing_agent(state: AgentState) -> AgentState:
     """Parse the uploaded CV + job description into structured objects."""
 
+    _debug("parsing: started")
+    parse_start = time.perf_counter()
     cv_bytes: bytes = state.get("cv_pdf_bytes", b"")
     jd_text: str = state.get("job_description_text", "")
 
@@ -84,19 +93,24 @@ def run_parsing_agent(state: AgentState) -> AgentState:
     updated = dict(state)
     updated["structured_cv"] = structured_cv
     updated["parsed_jd"] = parsed_jd
+    _debug("parsing: finished in %.2fs", time.perf_counter() - parse_start)
     return updated
 
 
 async def run_analysis_agent(state: AgentState) -> AgentState:
     """Use KB knowledge + LLM reasoning to produce an AnalysisReport."""
 
+    _debug("analysis: started")
+    analysis_start = time.perf_counter()
     structured_cv: StructuredCV = state.get("structured_cv", StructuredCV())
     parsed_jd: ParsedJD = state.get("parsed_jd", ParsedJD())
 
+    kb_start = time.perf_counter()
     ats_tips, cv_best = await asyncio.gather(
         get_kb_text("ats_tips"),
         get_kb_text("cv_best_practices"),
     )
+    _debug("analysis: KB fetched in %.2fs", time.perf_counter() - kb_start)
 
     heuristic_missing = _detect_missing_keywords(
         structured_cv.skills, parsed_jd.required_skills
@@ -104,7 +118,7 @@ async def run_analysis_agent(state: AgentState) -> AgentState:
     llm_payload = await _generate_analysis_summary(structured_cv, parsed_jd, ats_tips, cv_best)
 
     if llm_payload is None:
-        logger.warning("Analysis agent falling back to heuristic output")
+        logger.warning(format_with_request("Analysis agent falling back to heuristic output"))
         report = _build_heuristic_report(structured_cv, parsed_jd, heuristic_missing)
     else:
         report = AnalysisReport(
@@ -120,12 +134,15 @@ async def run_analysis_agent(state: AgentState) -> AgentState:
 
     updated = dict(state)
     updated["analysis_report"] = report
+    _debug("analysis: finished in %.2fs", time.perf_counter() - analysis_start)
     return updated
 
 
 async def run_rewriting_agent(state: AgentState) -> AgentState:
     """Rewrite CV sections using KB knowledge while avoiding hallucinations."""
 
+    _debug("rewriting: started")
+    rewrite_start = time.perf_counter()
     structured_cv: StructuredCV = state.get("structured_cv", StructuredCV())
     parsed_jd: ParsedJD = state.get("parsed_jd", ParsedJD())
     analysis: AnalysisReport = state.get("analysis_report", AnalysisReport())
@@ -134,7 +151,9 @@ async def run_rewriting_agent(state: AgentState) -> AgentState:
     rewrite_payload = await _generate_rewrites(structured_cv, parsed_jd, analysis, bullet_examples)
 
     if rewrite_payload is None:
-        logger.warning("Rewriting agent could not parse LLM output; returning pass-through sections")
+        logger.warning(
+            format_with_request("Rewriting agent could not parse LLM output; returning pass-through sections")
+        )
         rewritten = RewrittenSections(
             summary_before=structured_cv.summary,
             summary_after=structured_cv.summary,
@@ -156,6 +175,7 @@ async def run_rewriting_agent(state: AgentState) -> AgentState:
     updated = dict(state)
     updated["rewritten_sections"] = rewritten
     updated["final_markdown"] = final_markdown
+    _debug("rewriting: finished in %.2fs", time.perf_counter() - rewrite_start)
     return updated
 
 
@@ -300,6 +320,7 @@ def _estimate_match_level(required_skills: List[str], missing_skills: List[str])
 
 
 def _build_markdown_report(analysis: AnalysisReport, rewrites: RewrittenSections) -> str:
+    _debug("report: assembling markdown")
     lines = ["## CV Optimization Assistant"]
 
     lines.append("### Overall Match & ATS Readiness")
@@ -355,7 +376,9 @@ def _build_markdown_report(analysis: AnalysisReport, rewrites: RewrittenSections
             lines.append("")
 
     lines.append("_Generated by the CV Optimization Assistant._")
-    return "\n".join(line for line in lines if line is not None)
+    text = "\n".join(line for line in lines if line is not None)
+    _debug("report: markdown ready")
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -398,20 +421,31 @@ async def _generate_analysis_summary(
     chain = _ANALYSIS_PROMPT | llm | parser
 
     experience_text = _summarize_experience_blocks(structured_cv.experience)
+    llm_start = time.perf_counter()
+    _debug("analysis: calling LLM")
     try:
-        raw = await chain.ainvoke(
-            {
-                "cv_summary": structured_cv.summary or "",
-                "cv_skills": ", ".join(structured_cv.skills) or "",
-                "cv_experience": experience_text,
-                "jd_responsibilities": "\n".join(parsed_jd.responsibilities) or "",
-                "jd_required_skills": ", ".join(parsed_jd.required_skills) or "",
-                "ats_tips": ats_tips,
-                "cv_best_practices": cv_best,
-            }
+        raw = await asyncio.wait_for(
+            chain.ainvoke(
+                {
+                    "cv_summary": structured_cv.summary or "",
+                    "cv_skills": ", ".join(structured_cv.skills) or "",
+                    "cv_experience": experience_text,
+                    "jd_responsibilities": "\n".join(parsed_jd.responsibilities) or "",
+                    "jd_required_skills": ", ".join(parsed_jd.required_skills) or "",
+                    "ats_tips": ats_tips,
+                    "cv_best_practices": cv_best,
+                }
+            ),
+            timeout=LLM_TIMEOUT,
         )
+        _debug("analysis: LLM completed in %.2fs", time.perf_counter() - llm_start)
     except Exception as exc:  # pragma: no cover - defensive logging
-        logger.exception("Analysis LLM call failed: %s", exc)
+        if isinstance(exc, asyncio.TimeoutError):
+            logger.warning(
+                format_with_request("analysis LLM call timed out after %.1fs"), LLM_TIMEOUT
+            )
+        else:
+            logger.exception(format_with_request("Analysis LLM call failed: %s"), exc)
         return None
 
     try:
@@ -420,7 +454,10 @@ async def _generate_analysis_summary(
         snippet = raw.strip().replace("\n", " ")
         if len(snippet) > 200:
             snippet = snippet[:200] + "..."
-        logger.warning("LLM response was not valid JSON after cleaning, falling back: %s", snippet)
+        logger.warning(
+            format_with_request("LLM response was not valid JSON after cleaning, falling back: %s"),
+            snippet,
+        )
         return None
 
 
@@ -503,33 +540,44 @@ async def _generate_rewrites(
             {"role": None, "raw_text": structured_cv.raw_text[:500], "bullets": []}
         ]
 
+    llm_start = time.perf_counter()
+    _debug("rewriting: calling LLM")
     try:
-        raw = await chain.ainvoke(
-            {
-                "cv_summary": structured_cv.summary or "",
-                "cv_skills": ", ".join(structured_cv.skills) or "",
-                "experience_blocks": json.dumps(experience_payload, ensure_ascii=False),
-                "job_focus": json.dumps(
-                    {
-                        "role": parsed_jd.role_title,
-                        "required_skills": parsed_jd.required_skills,
-                        "responsibilities": parsed_jd.responsibilities,
-                    },
-                    ensure_ascii=False,
-                ),
-                "analysis_points": json.dumps(
-                    {
-                        "strengths": analysis.strengths,
-                        "issues": analysis.issues,
-                        "missing_keywords": analysis.missing_keywords,
-                    },
-                    ensure_ascii=False,
-                ),
-                "bullet_examples": bullet_examples,
-            }
+        raw = await asyncio.wait_for(
+            chain.ainvoke(
+                {
+                    "cv_summary": structured_cv.summary or "",
+                    "cv_skills": ", ".join(structured_cv.skills) or "",
+                    "experience_blocks": json.dumps(experience_payload, ensure_ascii=False),
+                    "job_focus": json.dumps(
+                        {
+                            "role": parsed_jd.role_title,
+                            "required_skills": parsed_jd.required_skills,
+                            "responsibilities": parsed_jd.responsibilities,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "analysis_points": json.dumps(
+                        {
+                            "strengths": analysis.strengths,
+                            "issues": analysis.issues,
+                            "missing_keywords": analysis.missing_keywords,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "bullet_examples": bullet_examples,
+                }
+            ),
+            timeout=LLM_TIMEOUT,
         )
+        _debug("rewriting: LLM completed in %.2fs", time.perf_counter() - llm_start)
     except Exception as exc:  # pragma: no cover
-        logger.exception("Rewriting LLM call failed: %s", exc)
+        if isinstance(exc, asyncio.TimeoutError):
+            logger.warning(
+                format_with_request("rewriting LLM call timed out after %.1fs"), LLM_TIMEOUT
+            )
+        else:
+            logger.exception(format_with_request("Rewriting LLM call failed: %s"), exc)
         return None
 
     try:
@@ -538,7 +586,10 @@ async def _generate_rewrites(
         snippet = raw.strip().replace("\n", " ")
         if len(snippet) > 200:
             snippet = snippet[:200] + "..."
-        logger.warning("LLM response was not valid JSON after cleaning, falling back: %s", snippet)
+        logger.warning(
+            format_with_request("LLM response was not valid JSON after cleaning, falling back: %s"),
+            snippet,
+        )
         return None
 
 
@@ -574,4 +625,3 @@ def _summarize_experience_blocks(experience: List[ExperienceEntry]) -> str:
         bullets = " | ".join(entry.bullets or [])
         summaries.append(f"Role: {entry.role or 'N/A'} — bullets: {bullets or entry.raw_text}")
     return "\n".join(summaries)
-
