@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from .logging_utils import configure_logging, get_logger
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging on module load
 configure_logging()

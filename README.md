@@ -82,7 +82,7 @@ For product-level requirements, see **`PRD.md`**.
 
 ## Requirements
 
-* Python **3.11+**
+* Python **3.11 or 3.12** (3.14+ not yet supported by LangChain/Pydantic)
 * An OpenAI-compatible API key (e.g. `OPENAI_API_KEY`)
 
   * Default model (suggested): **gpt-4o-mini** (can be changed)
@@ -101,8 +101,10 @@ cd <your-repo-folder>
 
 ### 2. Create and activate a virtual environment
 
+**Important:** Use Python 3.11 or 3.12 (not 3.14+)
+
 ```bash
-python -m venv .venv
+python3.11 -m venv .venv      # Use python3.11 explicitly
 source .venv/bin/activate     # On Windows: .venv\Scripts\activate
 ```
 
@@ -269,6 +271,35 @@ Potential future improvements:
   * LinkedIn profile summary generator
 * Integration with LangSmith for tracing and debugging.
 * More advanced ATS scoring with structured rules.
+
+---
+
+## Troubleshooting
+
+### Python Version Error (Pydantic v1 compatibility)
+
+**Error:**
+```
+UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+pydantic.v1.errors.ConfigError: unable to infer type for attribute "exception_key"
+```
+
+**Solution:**
+LangChain requires Python 3.11 or 3.12. Recreate your virtual environment:
+
+```bash
+rm -rf .venv
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### MCP Connection Issues
+
+If you see "Method not found" or timeout errors:
+- Ensure `mcp-server-filesystem` is installed: `npm install -g @modelcontextprotocol/server-filesystem`
+- Check logs with `CV_TAILOR_DEBUG=true`
+- The app automatically falls back to direct disk reads if MCP fails
 
 ---
 
