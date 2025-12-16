@@ -1,14 +1,11 @@
 ---
 title: "CV Optimization Assistant"
 techStack: ["Python", "LangChain", "LangGraph", "MCP"]
-summary: "
-Multi-agent, local-first AI assistant that takes your **CV (PDF)** and a **job description** (text), then:
-
-- Analyzes how well your CV matches the role  
-- Checks basic **ATS readiness**  
-- Rewrites key sections (Summary, Skills, Experience bullets)  
-- Explains **why** each change helps for this specific job
-"
+summary: "Multi-agent, local-first AI assistant that takes your **CV (PDF)** and a **job description** (text), then:
+  - Analyzes how well your CV matches the role  
+  - Checks basic **ATS readiness**  
+  - Rewrites key sections (Summary, Skills, Experience bullets)  
+  - Explains **why** each change helps for this specific job"
 githubUrl: "https://github.com/vadym-shevikov/cv-tailor"
 featured: true
 ---
